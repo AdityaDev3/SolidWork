@@ -10,8 +10,8 @@ Open index.html in a browser. No React, package installation, or build step is r
 - app.js: disease tabs, district selection, map zoom, search, notifications, forecast period, CSV export, and navigation
 - assets/: local images and favicon
 
-## Backend handoff
-All predictions, climate readings, alerts, and the profile are illustrative. Nothing is connected to a backend. Replace DEMO_DATA and ALERTS in app.js with validated API responses; call update() after loading the data. Map coloring is illustrative state-level coloring, not district-level prediction. The update() and updateCharts() functions render data into the existing HTML. Predictions are not medical advice.
+## Backend integration and data limits
+The shared `app.js` checks the existing ClimateGuard `GET /health` endpoint. The Predictions page sends the seven required numeric fields to `POST /predict` and displays the returned risk level, optional elevated probability, and warning. The current model uses synthetic demonstration data; its output is experimental and is not a validated real-world outbreak forecast. Other climate readings, alerts, maps, charts, and sensor values remain illustrative demo content because the backend does not provide those data endpoints. Predictions are not medical advice.
 
 ## Data attribution
 India boundaries: Amazing-coder1203/BharatMaps (public GeoJSON), simplified for display. Neighboring countries: johan/world.geo.json. City image is AI-generated illustrative imagery, not a verified location photo.
@@ -25,3 +25,8 @@ Loaded after styles.css / app.js on every page. It wraps update() and updateChar
 - Theme: light/dark toggle with a circular reveal (remembered in localStorage)
 - Sensor readings drift slightly every few seconds as a sample live feed (motion.js, section 16; remove that block if you do not want it)
 - prefers-reduced-motion switches all of it off
+
+
+## ClimateGuard local development
+
+Serve this folder over HTTP (do not open pages with `file://`): from this directory run `python -m http.server 5500 --bind 127.0.0.1`, then visit `http://127.0.0.1:5500/index.html`. Start the API from `P:\fusion hackthon 2\ClimateGuard` with `..\.venv\Scripts\python.exe -m uvicorn main:app --reload --host 127.0.0.1 --port 8002`. The shared `app.js` checks `/health`; the Predictions page submits the seven required numeric fields to `/predict`. Override the development API URL by defining `window.CLIMATEGUARD_API_BASE` before `app.js` loads. Predictions are experimental because the current model uses synthetic demonstration data.

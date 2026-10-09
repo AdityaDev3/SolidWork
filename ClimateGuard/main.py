@@ -6,6 +6,11 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+import urllib.request
+import json
+import time
+import os
+import csv
 
 # --------------------------------------------------
 # 1. APP CONFIGURATION
@@ -37,8 +42,8 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|null)$",
-    allow_credentials=True,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -181,3 +186,86 @@ def predict(data: PredictionInput):
             status_code=500,
             detail=f"Prediction failed: {str(exc)}",
         )
+
+# --------------------------------------------------
+# 6. EXTERNAL DATA INTEGRATIONS (REAL DATA)
+# --------------------------------------------------
+
+weather_cache = {"data": None, "timestamp": 0}
+CACHE_TTL = 1800  # 30 minutes
+
+@app.get("/api/weather/pune")
+def get_pune_weather():
+    global weather_cache
+    if weather_cache["data"] and (time.time() - weather_cache["timestamp"] < CACHE_TTL):
+        return weather_cache["data"]
+
+    # Using Open-Meteo as a free alternative without API key requirements
+    # IMD API requires registration and credentials which are unavailable.
+    url = "https://api.open-meteo.com/v1/forecast?latitude=18.5204&longitude=73.8567&current=temperature_2m,relative_humidity_2m,precipitation&timezone=Asia%2FKolkata"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'ClimateGuard/1.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            current = data.get("current", {})
+            result = {
+                "location": "Pune, Maharashtra",
+                "temperature": current.get("temperature_2m"),
+                "humidity": current.get("relative_humidity_2m"),
+                "rainfall": current.get("precipitation"),
+                "timestamp": current.get("time"),
+                "source": "Open-Meteo API",
+                "status": "success"
+            }
+            weather_cache["data"] = result
+            weather_cache["timestamp"] = time.time()
+            return result
+    except Exception as e:
+        return {"status": "error", "message": str(e), "source": "Open-Meteo API"}
+
+
+@app.get("/api/dengue/pune")
+def get_pune_dengue_data():
+    # Attempt to read from a verified official CSV file
+    csv_path = Path(__file__).parent / "data" / "pune_dengue_cases.csv"
+    if not csv_path.exists():
+        return {
+            "status": "unavailable",
+            "message": "Verified official dengue data is unavailable. Please provide 'data/pune_dengue_cases.csv' with columns: ['week_start', 'cases', 'source'].",
+            "source": "Pending CSV Import"
+        }
+    
+    cases_data = []
+    try:
+        with open(csv_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                cases_data.append(row)
+        return {
+            "status": "success",
+            "data": cases_data,
+            "source": "Local CSV Import"
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/environment/pune")
+def get_pune_environment_data():
+    # Require NASA Earthdata credentials in environment variables
+    earthdata_username = os.getenv("EARTHDATA_USERNAME")
+    earthdata_password = os.getenv("EARTHDATA_PASSWORD")
+    
+    if not earthdata_username or not earthdata_password:
+        return {
+            "status": "unavailable",
+            "message": "NASA Earthdata credentials missing. Set EARTHDATA_USERNAME and EARTHDATA_PASSWORD in environment.",
+            "source": "NASA Earthdata (Pending Authentication)"
+        }
+    
+    return {
+        "status": "success",
+        "message": "Credentials found. Real environmental integration to be processed.",
+        "source": "NASA Earthdata"
+    }
+
