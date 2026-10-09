@@ -9,6 +9,7 @@ const DEMO_DATA = [
 ];
 const adjustments={Dengue:0,Malaria:-11,Chikungunya:-19,Zika:-35};
 let disease='Dengue',district=0,zoom=1;
+let officialDengueRecords=[];
 const $=(s,root=document)=>root.querySelector(s);
 const $$=(s,root=document)=>Array.from(root.querySelectorAll(s));
 const score=i=>Math.max(8,DEMO_DATA[i].risk+adjustments[disease]);
@@ -46,15 +47,15 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();$('.se
 const input=$('[aria-label="Search district, city or disease"]');
 input?.addEventListener('input',()=>{$('.search-results')?.remove();const q=input.value.toLowerCase().trim();if(!q)return;const results=DEMO_DATA.map((d,i)=>({label:d.name+', '+d.state,index:i})).filter(d=>d.label.toLowerCase().includes(q));Object.keys(adjustments).filter(d=>d.toLowerCase().includes(q)).forEach(d=>results.push({label:d,disease:d}));const box=document.createElement('div');box.className='search-results';if(!results.length){box.textContent='No matching regions or diseases';}results.forEach(result=>{const b=document.createElement('button');b.className='inline-flex w-full items-center rounded-md p-3 text-xs hover:bg-accent';b.textContent=result.label;b.onclick=()=>{if(result.disease)disease=result.disease;else district=result.index;input.value='';box.remove();update();};box.appendChild(b);});$('.search').appendChild(box);});
 input?.addEventListener('keydown',e=>{if(e.key==='Enter')$('.search-results button')?.click();});
-function downloadReport(){const csv='District,State,Disease,Sample risk (%),Temperature (C),Rainfall (mm),Humidity (%)\n'+DEMO_DATA.map((d,i)=>`${d.name},${d.state},${disease},${score(i)},${d.temperature},${d.rain},${d.humidity}`).join('\n');const url=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));const a=document.createElement('a');a.href=url;a.download='aarogyasight-sample-report.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function downloadReport(){const csvEscape=value=>`"${String(value??'').replace(/"/g,'""')}"`;let csv,filename;if(/\/reports\.html$/i.test(location.pathname)){const headers=['period_start','period_end','area','area_level','cases','status','source','source_url','published_at'];csv=[headers.join(','),...officialDengueRecords.map(record=>headers.map(key=>csvEscape(record[key])).join(','))].join('\n');filename='aarogyasight-pune-official-dengue.csv';}else{csv='District,State,Disease,Sample risk (%),Temperature (C),Rainfall (mm),Humidity (%)\n'+DEMO_DATA.map((d,i)=>`${d.name},${d.state},${disease},${score(i)},${d.temperature},${d.rain},${d.humidity}`).join('\n');filename='aarogyasight-sample-report.csv';}const url=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));const a=document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 
 
-// ClimateGuard API integration. The backend currently exposes /health and /predict.
+// ClimateGuard API integration.
 const ClimateGuardAPI = (() => {
  const base = (window.CLIMATEGUARD_API_BASE || 'http://127.0.0.1:8002').replace(/\/$/, '');
- async function request(path, options = {}) {
+ async function request(path, options = {}, timeoutMs = 5000) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
    const response = await fetch(base + path, {...options, signal: controller.signal});
    let body;
@@ -70,7 +71,11 @@ const ClimateGuardAPI = (() => {
  return {
   base,
   health: () => request('/health'),
-  predict: payload => request('/predict', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})
+  predict: payload => request('/predict', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}),
+  puneWeather: () => request('/api/weather/pune'),
+  puneWeatherHistory: () => request('/api/weather/pune/history', {}, 15000),
+  puneDengue: () => request('/api/dengue/pune'),
+  puneEnvironment: () => request('/api/environment/pune')
  };
 })();
 window.ClimateGuardAPI = ClimateGuardAPI;
@@ -101,6 +106,204 @@ window.ClimateGuardAPI = ClimateGuardAPI;
   status.textContent = `DISCONNECTED · ${error.message}`;
  }
 })();
+
+function setClimateSummary(label, value, note) {
+ const card=$$('.summary-grid .stat-card').find(item=>{
+  const currentLabel=$('.stat-label',item)?.textContent.trim().toLowerCase()||'';
+  return currentLabel.includes(label)||(label==='rainfall'&&currentLabel.includes('precipitation'));
+ });
+ if(!card)return;
+ $('.stat-label',card).textContent=label==='temperature'?'Current temperature':label==='rainfall'?'Current precipitation':'Relative humidity';
+ $('.stat-value',card).textContent=value;
+ const trend=$('.trend',card);
+ if(trend)trend.hidden=true;
+ const noteElement=$('.stat-note',card);
+ if(noteElement)noteElement.textContent=note;
+}
+
+function climateTable() {
+ return $$('.data-table').find(table=>{
+  const headers=$$('thead th',table).map(cell=>cell.textContent.trim().toLowerCase());
+  return headers.includes('district')&&headers.includes('temperature')&&headers.includes('humidity');
+ });
+}
+
+function setTableMessage(table, message, columns=5) {
+ const body=$('tbody',table);
+ if(!body)return;
+ const row=document.createElement('tr');
+ const cell=document.createElement('td');
+ cell.colSpan=columns;
+ cell.textContent=message;
+ row.appendChild(cell);
+ body.replaceChildren(row);
+}
+
+async function loadPuneClimateData() {
+ const description=$('.section-header p');
+ const table=climateTable();
+ const recordsTable=table;
+ const status={current:'Loading current model conditions…',history:'Loading historical reanalysis…'};
+ const updateDescription=()=>{if(description)description.textContent=status.current+' '+status.history;};
+ if(table){
+  const headers=$$('thead th',table);
+  ['Date','Location','Mean temperature','Precipitation total','Mean humidity'].forEach((text,index)=>{if(headers[index])headers[index].textContent=text;});
+  setTableMessage(table,'Loading 30-day Pune climate history…');
+ }
+ setClimateSummary('temperature','Loading…','Pune · Open-Meteo');
+ setClimateSummary('rainfall','Loading…','Pune · Open-Meteo');
+ setClimateSummary('humidity','Loading…','Pune · Open-Meteo');
+ updateDescription();
+
+ ClimateGuardAPI.puneWeather().then(data=>{
+  if(data.status!=='success')throw new Error('Weather provider returned an unavailable result.');
+  const validAt=data.valid_at||'time unavailable';
+  const note=`Pune · Open-Meteo model estimate at ${validAt}`;
+  const value=(number,digits,suffix)=>Number.isFinite(number)?`${number.toFixed(digits)}${suffix}`:'Unavailable';
+  setClimateSummary('temperature',value(data.temperature_c,1,'°C'),note);
+  setClimateSummary('rainfall',value(data.precipitation_mm,2,' mm'),note);
+  setClimateSummary('humidity',value(data.relative_humidity_pct,0,'%'),note);
+  status.current=`Current Pune conditions are model estimates, not station observations. Valid at ${validAt}; source: ${data.source}; retrieved ${data.retrieved_at}.`;
+  updateDescription();
+ }).catch(error=>{
+  setClimateSummary('temperature','Unavailable','Weather provider unavailable');
+  setClimateSummary('rainfall','Unavailable','Weather provider unavailable');
+  setClimateSummary('humidity','Unavailable','Weather provider unavailable');
+  status.current=`Current Pune weather unavailable: ${error.message}`;
+  updateDescription();
+ });
+
+ ClimateGuardAPI.puneWeatherHistory().then(data=>{
+  if(data.status!=='success'||!Array.isArray(data.records))throw new Error('Historical weather response is invalid.');
+  if(recordsTable){
+   const body=$('tbody',recordsTable);
+   if(body){
+    const rows=data.records.map(record=>{
+     const row=document.createElement('tr');
+     const values=[
+      record.date,
+      record.location,
+      Number.isFinite(record.mean_temperature_c)?`${record.mean_temperature_c.toFixed(1)} °C`:'Unavailable',
+      Number.isFinite(record.precipitation_sum_mm)?`${record.precipitation_sum_mm.toFixed(1)} mm`:'Unavailable',
+      Number.isFinite(record.mean_relative_humidity_pct)?`${record.mean_relative_humidity_pct.toFixed(0)}%`:'Unavailable'
+     ];
+     values.forEach(value=>{const cell=document.createElement('td');cell.textContent=value;row.appendChild(cell);});
+     return row;
+    });
+    body.replaceChildren(...rows);
+    if(!rows.length)setTableMessage(recordsTable,'No historical climate records are available.');
+   }
+  }
+  status.history=`Daily Pune historical weather reanalysis (${data.period_start} to ${data.period_end}); source: ${data.source}; retrieved ${data.retrieved_at}. Not station observations.`;
+  updateDescription();
+ }).catch(error=>{
+  if(recordsTable)setTableMessage(recordsTable,`Historical Pune climate unavailable: ${error.message}`);
+  status.history=`Historical Pune climate unavailable: ${error.message}`;
+  updateDescription();
+ });
+}
+
+function caseRecordsTable() {
+ return $$('.data-table').find(table=>{
+  const headers=$$('thead th',table).map(cell=>cell.textContent.trim().toLowerCase());
+  return headers.includes('predicted risk')&&headers.includes('risk level');
+ });
+}
+
+function labelDemonstrationData() {
+ $$('.chart-legend span').forEach(item=>{
+  const label=item.textContent.trim().toLowerCase();
+  if((label.startsWith('predicted')||label.startsWith('historical'))&&!label.includes('demo')){
+   item.append(' (demo)');
+  }
+ });
+ const isClimatePage=/\/climate-data\.html$/i.test(location.pathname);
+ $$('.summary-grid .stat-card').forEach(card=>{
+  const label=$('.stat-label',card);
+  const value=$('.stat-value',card);
+  if(!label||!value)return;
+  const current=label.textContent.trim();
+  const normalized=current.toLowerCase();
+  if(normalized.includes('dengue risk')){
+   label.textContent=`Illustrative ${current}`;
+   value.textContent=`Demo · ${value.textContent.trim()}`;
+   const note=$('.stat-note',card);
+   if(note)note.textContent='Illustrative demo only';
+   const trend=$('.trend',card);
+   if(trend)trend.hidden=true;
+  }else if(/(temperature|rainfall|humidity)/.test(normalized)){
+   if(!isClimatePage)label.textContent=`${current} (demo)`;
+   const note=$('.stat-note',card);
+   if(!isClimatePage&&note)note.textContent='Illustrative demo value';
+   const trend=$('.trend',card);
+   if(trend)trend.hidden=true;
+  }
+ });
+ $$('.district-weather .weather-item .tiny').forEach(label=>{
+  if(!label.textContent.toLowerCase().includes('demo'))label.append(' (demo)');
+ });
+}
+
+function clearUnverifiedReportSummary() {
+ $$('.summary-grid .stat-card').forEach(card=>{
+  const label=$('.stat-label',card);
+  const value=$('.stat-value',card);
+  if(!label||!value)return;
+  const original=label.textContent.toLowerCase();
+  if(original.includes('dengue risk'))label.textContent='Verified Pune dengue cases';
+  else if(original.includes('temperature'))label.textContent='Climate temperature';
+  else if(original.includes('rainfall'))label.textContent='Climate precipitation';
+  else if(original.includes('humidity'))label.textContent='Climate humidity';
+  value.textContent='Unavailable';
+  const note=$('.stat-note',card);
+  if(note)note.textContent='No verified data is configured for this summary.';
+  const trend=$('.trend',card);
+  if(trend)trend.hidden=true;
+ });
+}
+
+async function loadPuneDengueData() {
+ const description=$('.section-header p');
+ const table=caseRecordsTable();
+ clearUnverifiedReportSummary();
+ if(description)description.textContent='Loading verified Pune surveillance records…';
+ if(!table)return;
+ const headers=$$('thead th',table);
+ ['Reporting period','Geographic area','Reported cases','Record status','Source / published'].forEach((text,index)=>{if(headers[index])headers[index].textContent=text;});
+ setTableMessage(table,'Loading official Pune dengue surveillance data…');
+ try{
+  const data=await ClimateGuardAPI.puneDengue();
+  officialDengueRecords=data.status==='success'&&Array.isArray(data.records)?data.records:[];
+  if(!officialDengueRecords.length){
+   setTableMessage(table,'Official Pune dengue case data unavailable. No case counts or historical trend are shown.');
+   if(description)description.textContent=`${data.message||'No verified Pune dengue records are configured.'} Only official CSV records with geographic area, reporting period, source, and publication date are displayed.`;
+   return;
+  }
+  const body=$('tbody',table);
+  const rows=officialDengueRecords.map(record=>{
+   const row=document.createElement('tr');
+   const values=[
+    `${record.period_start} - ${record.period_end}`,
+    `${record.area} (${record.area_level})`,
+    String(record.cases),
+    record.status,
+    `${record.source} · published ${record.published_at}`
+   ];
+   values.forEach(value=>{const cell=document.createElement('td');cell.textContent=value;row.appendChild(cell);});
+   return row;
+  });
+  if(body)body.replaceChildren(...rows);
+  if(description)description.textContent=`Imported Pune records only. Retrieved ${data.retrieved_at}. Confirm each source URL and publication against the original government report; reporting periods, geographic level, status, and publication dates are preserved.`;
+ }catch(error){
+  officialDengueRecords=[];
+  setTableMessage(table,`Official Pune dengue data unavailable: ${error.message}`);
+  if(description)description.textContent=`Official Pune dengue data unavailable: ${error.message}`;
+ }
+}
+
+labelDemonstrationData();
+if(/\/climate-data\.html$/i.test(location.pathname))loadPuneClimateData();
+if(/\/reports\.html$/i.test(location.pathname))loadPuneDengueData();
 
 const predictionForm = $('#climateguard-prediction-form');
 predictionForm?.addEventListener('submit', async event => {

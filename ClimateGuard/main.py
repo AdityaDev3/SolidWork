@@ -1,5 +1,7 @@
 
 from pathlib import Path
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import joblib
 import pandas as pd
@@ -7,10 +9,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import urllib.request
+import urllib.error
+import urllib.parse
 import json
 import time
-import os
 import csv
+import math
 
 # --------------------------------------------------
 # 1. APP CONFIGURATION
@@ -188,84 +192,346 @@ def predict(data: PredictionInput):
         )
 
 # --------------------------------------------------
-# 6. EXTERNAL DATA INTEGRATIONS (REAL DATA)
+# 6. EXTERNAL DATA INTEGRATIONS
 # --------------------------------------------------
 
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+OPEN_METEO_ATTRIBUTION = "Open-Meteo"
+OPEN_METEO_URL_ATTRIBUTION = "https://open-meteo.com/"
+PUNE_LATITUDE = 18.5204
+PUNE_LONGITUDE = 73.8567
+WEATHER_CACHE_TTL = 900
+HISTORY_CACHE_TTL = 21600
 weather_cache = {"data": None, "timestamp": 0}
-CACHE_TTL = 1800  # 30 minutes
+history_cache = {"data": None, "timestamp": 0}
+
+
+def _fetch_json(url: str, provider: str):
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "ClimateGuard/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"{provider} data request failed: {exc}",
+        ) from exc
+    if not isinstance(result, dict):
+        raise HTTPException(
+            status_code=502,
+            detail=f"{provider} returned an invalid response.",
+        )
+    return result
+
+
+def _number_or_none(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _retrieved_at():
+    return datetime.now(timezone.utc).isoformat()
 
 @app.get("/api/weather/pune")
 def get_pune_weather():
-    global weather_cache
-    if weather_cache["data"] and (time.time() - weather_cache["timestamp"] < CACHE_TTL):
+    if weather_cache["data"] and (
+        time.time() - weather_cache["timestamp"] < WEATHER_CACHE_TTL
+    ):
         return weather_cache["data"]
 
-    # Using Open-Meteo as a free alternative without API key requirements
-    # IMD API requires registration and credentials which are unavailable.
-    url = "https://api.open-meteo.com/v1/forecast?latitude=18.5204&longitude=73.8567&current=temperature_2m,relative_humidity_2m,precipitation&timezone=Asia%2FKolkata"
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'ClimateGuard/1.0'})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode())
-            current = data.get("current", {})
-            result = {
-                "location": "Pune, Maharashtra",
-                "temperature": current.get("temperature_2m"),
-                "humidity": current.get("relative_humidity_2m"),
-                "rainfall": current.get("precipitation"),
-                "timestamp": current.get("time"),
-                "source": "Open-Meteo API",
-                "status": "success"
-            }
-            weather_cache["data"] = result
-            weather_cache["timestamp"] = time.time()
-            return result
-    except Exception as e:
-        return {"status": "error", "message": str(e), "source": "Open-Meteo API"}
+    query = urllib.parse.urlencode({
+        "latitude": PUNE_LATITUDE,
+        "longitude": PUNE_LONGITUDE,
+        "current": "temperature_2m,relative_humidity_2m,precipitation",
+        "timezone": "Asia/Kolkata",
+    })
+    data = _fetch_json(f"{OPEN_METEO_URL}?{query}", OPEN_METEO_ATTRIBUTION)
+    current = data.get("current")
+    if not isinstance(current, dict) or not current.get("time"):
+        raise HTTPException(
+            status_code=502,
+            detail="Open-Meteo did not return current weather values for Pune.",
+        )
+
+    result = {
+        "status": "success",
+        "location": "Pune, Maharashtra",
+        "latitude": data.get("latitude"),
+        "longitude": data.get("longitude"),
+        "temperature_c": _number_or_none(current.get("temperature_2m")),
+        "relative_humidity_pct": _number_or_none(
+            current.get("relative_humidity_2m")
+        ),
+        "precipitation_mm": _number_or_none(current.get("precipitation")),
+        "valid_at": current["time"],
+        "interval_minutes": current.get("interval"),
+        "data_kind": "weather_model_estimate",
+        "source": OPEN_METEO_ATTRIBUTION,
+        "source_url": OPEN_METEO_URL_ATTRIBUTION,
+        "retrieved_at": _retrieved_at(),
+        "limitation": (
+            "Model-derived current conditions, not a Pune station observation. "
+            "Precipitation is the provider's current-interval estimate."
+        ),
+    }
+    weather_cache["data"] = result
+    weather_cache["timestamp"] = time.time()
+    return result
+
+
+@app.get("/api/weather/pune/history")
+def get_pune_weather_history():
+    if history_cache["data"] and (
+        time.time() - history_cache["timestamp"] < HISTORY_CACHE_TTL
+    ):
+        return history_cache["data"]
+
+    end_date = datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1)
+    start_date = end_date - timedelta(days=29)
+    query = urllib.parse.urlencode({
+        "latitude": PUNE_LATITUDE,
+        "longitude": PUNE_LONGITUDE,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "daily": "temperature_2m_mean,precipitation_sum",
+        "hourly": "relative_humidity_2m",
+        "timezone": "Asia/Kolkata",
+    })
+    data = _fetch_json(
+        f"{OPEN_METEO_ARCHIVE_URL}?{query}",
+        f"{OPEN_METEO_ATTRIBUTION} Historical Weather API",
+    )
+    daily = data.get("daily")
+    hourly = data.get("hourly")
+    if not isinstance(daily, dict) or not isinstance(hourly, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Open-Meteo did not return the requested historical climate series.",
+        )
+
+    dates = daily.get("time")
+    temperatures = daily.get("temperature_2m_mean")
+    precipitation = daily.get("precipitation_sum")
+    humidity_dates = hourly.get("time")
+    humidity_values = hourly.get("relative_humidity_2m")
+    if not all(
+        isinstance(values, list)
+        for values in (
+            dates, temperatures, precipitation, humidity_dates, humidity_values
+        )
+    ) or not (len(dates) == len(temperatures) == len(precipitation)):
+        raise HTTPException(
+            status_code=502,
+            detail="Open-Meteo returned mismatched historical climate series.",
+        )
+
+    humidity_by_date = {}
+    for timestamp, value in zip(humidity_dates, humidity_values):
+        humidity = _number_or_none(value)
+        if isinstance(timestamp, str) and humidity is not None:
+            humidity_by_date.setdefault(timestamp[:10], []).append(humidity)
+
+    records = []
+    for day, temperature, rain in zip(dates, temperatures, precipitation):
+        humidity_values_for_day = humidity_by_date.get(day, [])
+        records.append({
+            "date": day,
+            "location": "Pune, Maharashtra",
+            "mean_temperature_c": _number_or_none(temperature),
+            "precipitation_sum_mm": _number_or_none(rain),
+            "mean_relative_humidity_pct": (
+                sum(humidity_values_for_day) / len(humidity_values_for_day)
+                if humidity_values_for_day else None
+            ),
+        })
+
+    result = {
+        "status": "success",
+        "period_start": start_date.isoformat(),
+        "period_end": end_date.isoformat(),
+        "location": "Pune, Maharashtra",
+        "records": records,
+        "data_kind": "historical_weather_reanalysis",
+        "humidity_method": (
+            "Daily arithmetic mean of available hourly relative-humidity values."
+        ),
+        "source": "Open-Meteo Historical Weather API",
+        "source_url": "https://open-meteo.com/en/docs/historical-weather-api",
+        "retrieved_at": _retrieved_at(),
+        "limitation": (
+            "Historical model reanalysis, not station observations. "
+            "Recent days may be revised or unavailable."
+        ),
+    }
+    history_cache["data"] = result
+    history_cache["timestamp"] = time.time()
+    return result
 
 
 @app.get("/api/dengue/pune")
 def get_pune_dengue_data():
-    # Attempt to read from a verified official CSV file
     csv_path = Path(__file__).parent / "data" / "pune_dengue_cases.csv"
     if not csv_path.exists():
         return {
             "status": "unavailable",
-            "message": "Verified official dengue data is unavailable. Please provide 'data/pune_dengue_cases.csv' with columns: ['week_start', 'cases', 'source'].",
-            "source": "Pending CSV Import"
+            "message": (
+                "No verified Pune dengue surveillance CSV is installed. "
+                "Import only official records using the documented schema in "
+                "ClimateGuard/data/README.md."
+            ),
+            "required_columns": [
+                "period_start", "period_end", "area", "area_level", "cases",
+                "source", "source_url", "published_at", "status",
+            ],
+            "source": "No dataset configured",
+            "retrieved_at": _retrieved_at(),
         }
-    
+
     cases_data = []
+    required_columns = {
+        "period_start", "period_end", "area", "area_level", "cases",
+        "source", "source_url", "published_at", "status",
+    }
     try:
-        with open(csv_path, "r") as f:
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
+            if not reader.fieldnames or not required_columns.issubset(reader.fieldnames):
+                raise ValueError(
+                    "CSV is missing required columns: "
+                    + ", ".join(sorted(required_columns))
+                )
             for row in reader:
-                cases_data.append(row)
+                if not row.get("area", "").strip():
+                    raise ValueError("Each CSV row must include its geographic area.")
+                try:
+                    period_start = date.fromisoformat(row["period_start"])
+                    period_end = date.fromisoformat(row["period_end"])
+                    published_at = date.fromisoformat(row["published_at"])
+                    case_count = int(row["cases"])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "Dates must use YYYY-MM-DD and cases must be a whole number."
+                    ) from exc
+                if period_end < period_start or case_count < 0:
+                    raise ValueError(
+                        "Reporting period must be ordered and cases cannot be negative."
+                    )
+                if row.get("status", "").strip().lower() not in {
+                    "reported", "provisional", "incomplete", "aggregated"
+                }:
+                    raise ValueError(
+                        "status must be reported, provisional, incomplete, or aggregated."
+                    )
+                if not all(row.get(field, "").strip() for field in (
+                    "area_level", "source", "source_url", "published_at"
+                )):
+                    raise ValueError(
+                        "Each row must include area_level, source, source_url, "
+                        "and published_at."
+                    )
+                source_url = urllib.parse.urlparse(row["source_url"].strip())
+                if (
+                    source_url.scheme != "https"
+                    or not source_url.hostname
+                    or not (
+                        source_url.hostname == "gov.in"
+                        or source_url.hostname.endswith(".gov.in")
+                    )
+                ):
+                    raise ValueError(
+                        "source_url must be an HTTPS link on an official .gov.in domain."
+                    )
+                area = row["area"].strip().casefold()
+                area_level = row["area_level"].strip().casefold()
+                if not (
+                    (area == "pune district" and area_level == "district")
+                    or (
+                        area == "pune municipal corporation"
+                        and area_level in {"municipal corporation", "city"}
+                    )
+                ):
+                    continue
+                cases_data.append({
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "area": row["area"].strip(),
+                    "area_level": row["area_level"].strip(),
+                    "cases": case_count,
+                    "source": row["source"].strip(),
+                    "source_url": source_url.geturl(),
+                    "published_at": published_at.isoformat(),
+                    "status": row["status"].strip().lower(),
+                })
+    except (OSError, csv.Error, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid Pune dengue CSV: {exc}",
+        ) from exc
+
+    cases_data.sort(key=lambda item: (item["period_start"], item["area_level"]))
+    if not cases_data:
         return {
-            "status": "success",
-            "data": cases_data,
-            "source": "Local CSV Import"
+            "status": "unavailable",
+            "message": (
+                "The imported file contains no Pune-level records. "
+                "Maharashtra-wide records are not presented as Pune data."
+            ),
+            "source": "Local official CSV import",
+            "retrieved_at": _retrieved_at(),
         }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return {
+        "status": "success",
+        "geographic_filter": "Pune district or Pune Municipal Corporation only",
+        "records": cases_data,
+        "source": "Verified official CSV import",
+        "retrieved_at": _retrieved_at(),
+    }
 
 
 @app.get("/api/environment/pune")
 def get_pune_environment_data():
-    # Require NASA Earthdata credentials in environment variables
-    earthdata_username = os.getenv("EARTHDATA_USERNAME")
-    earthdata_password = os.getenv("EARTHDATA_PASSWORD")
-    
-    if not earthdata_username or not earthdata_password:
-        return {
-            "status": "unavailable",
-            "message": "NASA Earthdata credentials missing. Set EARTHDATA_USERNAME and EARTHDATA_PASSWORD in environment.",
-            "source": "NASA Earthdata (Pending Authentication)"
-        }
-    
     return {
-        "status": "success",
-        "message": "Credentials found. Real environmental integration to be processed.",
-        "source": "NASA Earthdata"
+        "status": "unavailable",
+        "location": "Pune, Maharashtra",
+        "indicators": {
+            "ndvi": None,
+            "surface_water": None,
+        },
+        "message": (
+            "No verified Pune raster values are configured. NDVI requires "
+            "NASA Earthdata access, quality screening, and spatial extraction; "
+            "no satellite values are inferred or substituted."
+        ),
+        "candidate_ndvi_dataset": {
+            "name": "MODIS/Terra MOD13Q1.061",
+            "resolution_m": 250,
+            "composite_days": 16,
+            "ndvi_scale_factor": 0.0001,
+            "source": (
+                "https://www.earthdata.nasa.gov/data/catalog/lpcloud-mod13q1-061"
+            ),
+        },
+        "candidate_surface_water_method": {
+            "index": "Normalized Difference Water Index (NDWI)",
+            "formula": "(green_surface_reflectance - NIR_surface_reflectance) / "
+            "(green_surface_reflectance + NIR_surface_reflectance)",
+            "dataset": "MODIS/Terra MOD09A1.061",
+            "resolution_m": 500,
+            "composite_days": 8,
+            "surface_reflectance_scale_factor": 0.0001,
+            "source": (
+                "https://www.earthdata.nasa.gov/data/catalog/lpcloud-mod09a1-061"
+            ),
+            "limitation": (
+                "NDWI is a derived spectral index, not a measured water-area "
+                "or water-occurrence estimate."
+            ),
+        },
+        "source": "NASA LP DAAC",
+        "retrieved_at": _retrieved_at(),
     }
-

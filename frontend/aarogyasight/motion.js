@@ -535,23 +535,6 @@
     };
   });
 
-  /* ================= 16. Gentle live feed for sensor readings (sample data) ================= */
-  safe('live', () => {
-    const vals = $$('.sensor strong').filter(el => parse(el.textContent));
-    if (!vals.length || reduce) return;
-    vals.forEach(el => { el._base = parse(el.dataset.final || el.textContent); el._now = el._base.n; });
-    setInterval(() => {
-      if (document.hidden) return;
-      const el = vals[Math.floor(Math.random() * vals.length)], b = el._base;
-      const step = b.dec ? Math.pow(10, -b.dec) : 1;
-      let v = el._now + (Math.random() < .5 ? -1 : 1) * step * (1 + Math.floor(Math.random() * 2));
-      v = clamp(v, b.n * .95, b.n * 1.05);
-      const to = b.pre + v.toFixed(b.dec) + b.suf;
-      countTo(el, to, { from: el._now, dur: 700 }); el._now = v;
-      el.classList.remove('tick'); reflow(el); el.classList.add('tick');
-    }, 2600);
-  });
-
   /* ================= 17. Page-to-page fade ================= */
   safe('leave', () => {
     document.addEventListener('click', e => {
