@@ -30,3 +30,6 @@ Loaded after styles.css / app.js on every page. It wraps update() and updateChar
 ## ClimateGuard local development
 
 Serve this folder over HTTP (do not open pages with `file://`): from this directory run `python -m http.server 5500 --bind 127.0.0.1`, then visit `http://127.0.0.1:5500/index.html`. Start the API from `P:\fusion hackthon 2\ClimateGuard` with `..\.venv\Scripts\python.exe -m uvicorn main:app --reload --host 127.0.0.1 --port 8002`. The shared `app.js` checks `/health`; the Predictions page submits the seven required numeric fields to `/predict`. Override the development API URL by defining `window.CLIMATEGUARD_API_BASE` before `app.js` loads. Predictions are experimental because the current model uses synthetic demonstration data.
+
+## Disease assistant
+A floating chat button is available on every page. The in-browser assistant can rank the dashboard's illustrative disease-risk scores for the selected sample region, compare the four sample cities, and answer basic disease questions with links to WHO information. It does not use actual case totals for those sample regions or provide diagnosis or treatment. A Pune dengue case-count answer is shown only if the ClimateGuard `/api/dengue/pune` endpoint has a dated case-data CSV available.

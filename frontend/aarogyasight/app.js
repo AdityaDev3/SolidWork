@@ -135,3 +135,16 @@ predictionForm?.addEventListener('submit', async event => {
   result.removeAttribute('aria-busy');
  }
 });
+
+// Read-only snapshot for the on-page disease assistant. These are illustrative
+// risk scores from the dashboard demo, not observed case counts.
+window.AarogyaSightChatData = {
+ snapshot() {
+  return {
+   cities: DEMO_DATA.map(({name, state, risk}) => ({name, state, baseRisk: risk})),
+   diseaseAdjustments: {...adjustments},
+   currentCity: DEMO_DATA[district]?.name || DEMO_DATA[0].name,
+   currentDisease: disease
+  };
+ }
+};
