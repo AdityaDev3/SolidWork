@@ -7,3 +7,20 @@
 .animate-fade-in {
   animation: fadeIn 0.3s ease-out forwards;
 }
+
+@keyframes aboutReveal {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.mo .about-hero { animation: aboutReveal .7s ease-out both .1s; }
+.mo .about-section-heading { animation: aboutReveal .6s ease-out both .2s; }
+.mo .about-card { animation: aboutReveal .6s ease-out both; }
+.mo .about-card:nth-child(1) { animation-delay: .28s; }
+.mo .about-card:nth-child(2) { animation-delay: .38s; }
+.mo .about-card:nth-child(3) { animation-delay: .48s; }
+.mo .about-demo-note { animation: aboutReveal .6s ease-out both .55s; }
+@media (prefers-reduced-motion: reduce) {
+  .mo .about-hero, .mo .about-section-heading, .mo .about-card, .mo .about-demo-note {
+    animation: none;
+  }
+}
