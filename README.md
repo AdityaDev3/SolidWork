@@ -125,66 +125,44 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-  autonumber
-  actor User
-  participant Browser as AarogyaSight in browser
-  participant API as ClimateGuard API
+  participant User
+  participant Browser as AarogyaSight browser
+  participant API as ClimateGuard FastAPI
   participant Model as Joblib Random Forest
   participant Weather as Open-Meteo
   participant CSV as Optional official CSV
   participant AI as Ollama model
 
-  User->>Browser: Open a dashboard page
+  User->>Browser: Open dashboard
   Browser->>API: GET /health
-  API-->>Browser: Model availability and data status
-
-  opt Climate data page
-    Browser->>API: GET /api/weather/pune
-    API->>API: Check 15-minute in-process cache
-    opt Cache is stale or empty
-      API->>Weather: Request current Pune model fields
-      Weather-->>API: Current-interval estimate
-      API->>API: Validate response, label provenance, cache result
-    end
-    API-->>Browser: Temperature, humidity, precipitation, timestamps and caveat
-    Browser->>API: GET /api/weather/pune/history
-    API->>API: Check 6-hour in-process cache
-    opt Cache is stale or empty
-      API->>Weather: Request previous 30 complete days
-      Weather-->>API: Daily values and hourly humidity series
-      API->>API: Aggregate available humidity values by local date
-    end
-    API-->>Browser: Historical reanalysis, explicitly not station observations
-  end
-
-  opt User submits a model input form
-    User->>Browser: Submit seven validated feature values
-    Browser->>API: POST /predict
-    API->>API: Validate values and restore training feature order
-    API->>Model: Predict class and class probabilities
-    Model-->>API: Lower/elevated class and optional probability
-    API-->>Browser: Result, dataset status and model warning
-  end
-
-  opt User opens surveillance reports
-    Browser->>API: GET /api/dengue/pune
-    API->>CSV: Read and validate optional local CSV
-    alt Verified Pune rows exist
-      API-->>Browser: Filtered records with source and reporting period
-    else No usable records
-      API-->>Browser: Unavailable status; no fabricated counts
-    end
-  end
-
-  opt User asks the assistant
-    Browser->>API: POST /chat with message and bounded history
-    API->>API: Assemble trusted backend context
-    API->>Weather: Obtain current/historical context when available
-    API->>CSV: Obtain verified counts when available
-    API->>AI: Send system rules, trusted context and conversation
-    AI-->>API: Plain-text response
-    API-->>Browser: Response or explicit unavailable-service error
-  end
+  API-->>Browser: Model availability and dataset status
+  Browser->>API: GET /api/weather/pune when climate page is opened
+  API->>Weather: Fetch current Pune estimate on cache miss
+  Weather-->>API: Current model-derived weather values
+  API-->>Browser: Weather, provenance, timestamp and caveat
+  Browser->>API: GET /api/weather/pune/history when climate page is opened
+  API->>Weather: Fetch previous 30 complete days on cache miss
+  Weather-->>API: Daily history and hourly humidity series
+  API->>API: Aggregate available humidity values by local date
+  API-->>Browser: Historical reanalysis, not station observations
+  User->>Browser: Submit seven model features
+  Browser->>API: POST /predict
+  API->>API: Validate input and restore training feature order
+  API->>Model: Predict class and class probabilities
+  Model-->>API: Lower or elevated class and optional probability
+  API-->>Browser: Result, dataset status and model warning
+  Browser->>API: GET /api/dengue/pune when reports page is opened
+  API->>CSV: Read and validate optional local CSV
+  CSV-->>API: Verified rows or no usable rows
+  API-->>Browser: Filtered records or explicit unavailable status
+  User->>Browser: Ask the assistant a question
+  Browser->>API: POST /chat with message and bounded history
+  API->>API: Assemble trusted backend context
+  API->>Weather: Request current and historical context when available
+  API->>CSV: Request verified counts when available
+  API->>AI: Send system rules, trusted context and conversation
+  AI-->>API: Plain-text response
+  API-->>Browser: Response or explicit unavailable-service error
 ```
 
 ## Repository layout
@@ -299,7 +277,7 @@ The classifier target is the dataset column `target_next_week_elevated`. The tra
 The training script configures 300 trees, maximum depth 8, minimum leaf size 3, balanced class weights, random seed 42, and parallel tree fitting. If tree \(m\) predicts class \(h_m(x)\), the forest class prediction is the majority vote:
 
 $$
-\hat{y}(x) = \operatorname{mode}\{h_1(x), h_2(x), \ldots, h_{300}(x)\}
+\hat{y}(x) = \text{mode}\{h_1(x), h_2(x), \ldots, h_{300}(x)\}
 $$
 
 When the estimator provides class probabilities, the API returns the probability for class \(1\) (elevated) as `elevated_probability`. That probability is a model output, not a calibrated or validated real-world disease probability.
@@ -309,13 +287,13 @@ When the estimator provides class probabilities, the API returns the probability
 The API documents candidate satellite-derived indices but does not currently provide extracted Pune raster values. For reference, common definitions are:
 
 $$
-\operatorname{NDVI} = \frac{\operatorname{NIR} - \operatorname{Red}}
-{\operatorname{NIR} + \operatorname{Red}}
+\text{NDVI} = \frac{\text{NIR} - \text{Red}}
+{\text{NIR} + \text{Red}}
 $$
 
 $$
-\operatorname{NDWI} = \frac{\operatorname{Green} - \operatorname{NIR}}
-{\operatorname{Green} + \operatorname{NIR}}
+\text{NDWI} = \frac{\text{Green} - \text{NIR}}
+{\text{Green} + \text{NIR}}
 $$
 
 These ratios require properly scaled surface reflectance, quality/cloud screening, geospatial boundaries, and time alignment. NDWI is not itself a direct measurement of water area. The endpoint returns `null` indicators and an unavailable status rather than inventing values.
@@ -389,15 +367,15 @@ The values above are an **illustrative request shape**, not a recommended operat
 The training script prints held-out accuracy, balanced accuracy, precision, recall, F1, a confusion matrix, and a classification report, and compares against a majority-class baseline. For positive/elevated class \(1\):
 
 $$
-\operatorname{Precision} = \frac{TP}{TP + FP}
+\text{Precision} = \frac{TP}{TP + FP}
 \qquad
-\operatorname{Recall} = \frac{TP}{TP + FN}
+\text{Recall} = \frac{TP}{TP + FN}
 $$
 
 $$
 F_1 = 2 \cdot
-\frac{\operatorname{Precision}\cdot\operatorname{Recall}}
-{\operatorname{Precision}+\operatorname{Recall}}
+\frac{\text{Precision}\cdot\text{Recall}}
+{\text{Precision}+\text{Recall}}
 $$
 
 Balanced accuracy averages recall over the classes, so it is less dominated by the most frequent class than plain accuracy. These metrics describe performance on synthetic example records only and do not establish predictive validity on real surveillance data.
